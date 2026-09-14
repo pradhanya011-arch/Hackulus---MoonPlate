@@ -4,9 +4,44 @@ import pool from "../db.js";
 const router = express.Router();
 
 
-// ===============================
+// ========================================
+// GET ALL ORDERS FOR A USER
+// ========================================
+router.get("/user/:userId", async (req, res) => {
+    const { userId } = req.params;
+
+    try {
+        const result = await pool.query(
+            `SELECT
+                id,
+                order_number,
+                user_id,
+                total_amount,
+                status,
+                created_at
+             FROM orders
+             WHERE user_id = $1
+             ORDER BY created_at DESC`,
+            [userId]
+        );
+
+        res.json({
+            orders: result.rows
+        });
+
+    } catch (error) {
+        console.error("Fetch orders error:", error);
+
+        res.status(500).json({
+            message: "Failed to fetch orders"
+        });
+    }
+});
+
+
+// ========================================
 // CREATE ORDER FROM CART
-// ===============================
+// ========================================
 router.post("/from-cart/:userId", async (req, res) => {
 
     const { userId } = req.params;
@@ -40,7 +75,6 @@ router.post("/from-cart/:userId", async (req, res) => {
             });
         }
 
-
         // 2. Check stock and calculate total
         let totalAmount = 0;
 
@@ -59,7 +93,6 @@ router.post("/from-cart/:userId", async (req, res) => {
                 Number(item.quantity) * Number(item.price);
         }
 
-
         // 3. Create order
         const orderResult = await client.query(
             `INSERT INTO orders
@@ -72,7 +105,6 @@ router.post("/from-cart/:userId", async (req, res) => {
 
         const order = orderResult.rows[0];
 
-
         // 4. Generate MP1, MP2, MP3...
         const orderNumber = `MP${order.id}`;
 
@@ -82,7 +114,6 @@ router.post("/from-cart/:userId", async (req, res) => {
              WHERE id = $2`,
             [orderNumber, order.id]
         );
-
 
         // 5. Copy cart items into order_items
         for (const item of cartResult.rows) {
@@ -101,7 +132,6 @@ router.post("/from-cart/:userId", async (req, res) => {
             );
         }
 
-
         // 6. Clear user's cart
         await client.query(
             `DELETE FROM cart
@@ -109,10 +139,8 @@ router.post("/from-cart/:userId", async (req, res) => {
             [userId]
         );
 
-
         // 7. Finish transaction
         await client.query("COMMIT");
-
 
         // 8. Send response
         res.status(201).json({
@@ -151,7 +179,6 @@ router.post("/from-cart/:userId", async (req, res) => {
     } finally {
 
         client.release();
-
     }
 });
 

@@ -2,6 +2,7 @@ import express from "express";
 import Razorpay from "razorpay";
 import pool from "../db.js";
 import crypto from "crypto";
+
 const router = express.Router();
 
 const razorpay = new Razorpay({
@@ -9,11 +10,14 @@ const razorpay = new Razorpay({
     key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+
+// ========================================
+// CREATE RAZORPAY ORDER
+// ========================================
 router.post("/create/:orderId", async (req, res) => {
     try {
         const { orderId } = req.params;
 
-        // Get MoonPlate order
         const orderResult = await pool.query(
             `SELECT id, order_number, total_amount, status
              FROM orders
@@ -35,19 +39,16 @@ router.post("/create/:orderId", async (req, res) => {
             });
         }
 
-        // Razorpay amount must be in paise
         const amountInPaise = Math.round(
             Number(order.total_amount) * 100
         );
 
-        // Create Razorpay order
         const razorpayOrder = await razorpay.orders.create({
             amount: amountInPaise,
             currency: "INR",
             receipt: order.order_number
         });
 
-        // Save payment information
         await pool.query(
             `INSERT INTO payments
              (order_id, razorpay_order_id, amount, status)
@@ -67,21 +68,28 @@ router.post("/create/:orderId", async (req, res) => {
             razorpayOrderId: razorpayOrder.id,
             amount: amountInPaise,
             currency: "INR",
-            keyId: process.env.RAZORPAY_KEY_ID
+            key: process.env.RAZORPAY_KEY_ID
         });
 
     } catch (error) {
-        console.error("Razorpay order creation error:", error);
+        console.error(
+            "Razorpay order creation error:",
+            error
+        );
 
         res.status(500).json({
             message: "Failed to create Razorpay order"
         });
     }
 });
+
+
+// ========================================
+// VERIFY PAYMENT + GENERATE QR TOKEN
+// ========================================
 router.post("/verify", async (req, res) => {
     try {
         const {
-            orderId,
             razorpay_order_id,
             razorpay_payment_id,
             razorpay_signature
@@ -89,7 +97,6 @@ router.post("/verify", async (req, res) => {
 
         // Check required values
         if (
-            !orderId ||
             !razorpay_order_id ||
             !razorpay_payment_id ||
             !razorpay_signature
@@ -99,13 +106,17 @@ router.post("/verify", async (req, res) => {
             });
         }
 
-        // Get payment record from our database
+        // Find payment record
         const paymentResult = await pool.query(
-            `SELECT id, order_id, razorpay_order_id, amount, status
+            `SELECT
+                id,
+                order_id,
+                razorpay_order_id,
+                amount,
+                status
              FROM payments
-             WHERE order_id = $1
-             AND razorpay_order_id = $2`,
-            [orderId, razorpay_order_id]
+             WHERE razorpay_order_id = $1`,
+            [razorpay_order_id]
         );
 
         if (paymentResult.rows.length === 0) {
@@ -116,22 +127,25 @@ router.post("/verify", async (req, res) => {
 
         const payment = paymentResult.rows[0];
 
-        // Create the signature using our Razorpay secret
+        // Generate expected Razorpay signature
         const generatedSignature = crypto
-            .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+            .createHmac(
+                "sha256",
+                process.env.RAZORPAY_KEY_SECRET
+            )
             .update(
                 `${razorpay_order_id}|${razorpay_payment_id}`
             )
             .digest("hex");
 
-        // Compare Razorpay signature with our generated signature
+        // Verify signature
         if (generatedSignature !== razorpay_signature) {
             return res.status(400).json({
                 message: "Invalid payment signature"
             });
         }
 
-        // Payment is verified
+        // Update payment
         await pool.query(
             `UPDATE payments
              SET razorpay_payment_id = $1,
@@ -145,20 +159,66 @@ router.post("/verify", async (req, res) => {
             ]
         );
 
+        // ========================================
+        // GENERATE UNIQUE QR TOKEN
+        // ========================================
+
+        const qrToken = crypto
+            .randomBytes(32)
+            .toString("hex");
+
+        // Mark order PAID and attach QR token
+        const orderResult = await pool.query(
+            `UPDATE orders
+             SET status = 'PAID',
+                 qr_token = $1,
+                 qr_redeemed = FALSE
+             WHERE id = $2
+             RETURNING
+                id,
+                order_number,
+                status,
+                qr_token,
+                qr_redeemed`,
+            [
+                qrToken,
+                payment.order_id
+            ]
+        );
+
+        const updatedOrder = orderResult.rows[0];
+
+        // ========================================
+        // SEND SUCCESS RESPONSE
+        // ========================================
+
         res.json({
             message: "Payment verified successfully",
-            orderId: payment.order_id,
+
+            orderId: updatedOrder.id,
+
+            orderNumber: updatedOrder.order_number,
+
             paymentId: razorpay_payment_id,
-            status: "VERIFIED"
+
+            status: "PAID",
+
+            qrToken: updatedOrder.qr_token,
+
+            qrRedeemed: updatedOrder.qr_redeemed
         });
 
     } catch (error) {
-        console.error("Payment verification error:", error);
+        console.error(
+            "Payment verification error:",
+            error
+        );
 
         res.status(500).json({
             message: "Payment verification failed"
         });
     }
 });
+
 
 export default router;
